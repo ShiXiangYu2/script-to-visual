@@ -1,0 +1,132 @@
+---
+name: script-to-visual
+description: 剧本画面化工作流。当用户给出中文短剧/网剧剧本（docx），要求把「除了对白以外的动作、情绪舞台指示（△ 行）」改写成有文学画面感、且 AI 视频模型能演出来的画面描述时使用。只改 △ 行，对白行、os 内心独白、场次标题、剧情事实一字不动；另存新 docx 不覆盖原件，并产出前后对照表。触发词：剧本画面化、动作改画面、△行改写、舞台指示可视化、AI 能演出来的描写、把剧本改成画面描述。
+version: 1.0.0
+author: script-to-visual contributors
+---
+
+# 剧本画面化工作流（script-to-visual）
+
+## 这个 Skill 解决什么
+
+中文短剧剧本里的舞台提示通常是**功能性动作**，例如：
+
+```
+△ 老陈没接话。
+△ 屋里静了一会儿。
+```
+
+这种写法人能读懂，但**没有画面感、AI 演不出来**——因为它只交代"发生了什么"，没交代"镜头里看得见什么"。
+本工作流把这类 △ 行改写成**文学画面描述**：
+
+```
+△ 老陈的喉结动了一下，把手里的扳手翻了个面，抬眼扫了下小王，又低下去看那只轮胎。
+△ 铺子里的挂钟走了三格，风从卷帘门底下钻进来，把地上的一张报纸掀了个角又落下。
+```
+
+核心标准只有一句：**把"告知"改成"可见"**——只写镜头拍得到的物理事实，让读者/模型自己得出情绪。
+
+---
+
+## 输入 / 输出契约
+
+| 项 | 约定 |
+|---|---|
+| 输入 | 一个 `.docx` 剧本（含 `第X场：地点・日/夜・内/外` 标题、`△` 动作行、`角色：对白`、`角色os：内心独白`） |
+| 改写对象 | **仅 `△` 开头的段落** |
+| 不动对象 | 对白行、`os` 行、场次标题、页码、样式、图片、以及 △ 行里的**剧情事实** |
+| 输出 1 | 改写后的完整剧本 **新文件** `原名_画面化稿.docx`（原文件绝不覆盖、绝不修改） |
+| 输出 2 | 前后对照表 `原名_改写对照.md`（逐条 原句 → 改后 → 换了哪条通道） |
+| 默认粒度 | 先试跑 1–2 场给用户过目，确认风格后再全量 80 集 |
+
+---
+
+## 四阶段工作流
+
+### ① 解析（脚本负责）
+```bash
+python3 scripts/parse_docx.py "<剧本.docx>" -o "<工作目录>/parsed.json"
+```
+产出结构化 JSON：每个段落的 `index / type(scene|action|dialogue|os|other) / text / scene_id`。
+**先给用户看统计**：共几场、多少条 △ 行、多少条对白，确认识别无误再往下走。
+
+### ② 改写（模型负责，按规则库）
+读 `references/01-改写规则.md`、`references/02-情绪外显对照表.md`，对每条 △ 行逐条改写。
+改写是**创作活**，由模型执行；脚本只负责精确定位与安全落盘。
+产出 `rewrite_map.json`：`{"<段落index>": "改写后的△文本", ...}`（格式见 `templates/rewrite_map.example.json`）。
+
+> ⚠️ 全量 80 集时按场次分批（建议每批 5–10 场），避免一次输出过长导致后半段质量塌方；每批结束跑一次校验。
+
+### ③ 校验（脚本负责）
+```bash
+python3 scripts/check_rewrite.py "<工作目录>/parsed.json" "<工作目录>/rewrite_map.json"
+```
+四项机检，任一不过必须打回重写：
+1. **对白零改动**：非 △ 行一律不出现在 rewrite_map 里
+2. **事实不丢**：原文的关键事实词（人名、时间、物件、动作结果）在改写后仍可追踪
+3. **无不可演词**：不出现"感到/觉得/心想/意识到/心里一紧"等纯心理动词
+4. **可拍摄性**：每条改写含至少一个具体身体动作或物理细节
+
+### ④ 输出（脚本负责）
+```bash
+python3 scripts/apply_rewrite.py "<剧本.docx>" "<工作目录>/rewrite_map.json" "<输出目录>/原名_画面化稿.docx"
+```
+原理：**复制原 docx 的 zip，只替换目标 `△` 段落内 `<w:t>` 的文字**，其余 XML 字节不动
+→ 场次标题样式、对白、页码、字体、图片 100% 保留，且天然是另存新文件。
+
+最后用 `present_files` 打开新 docx 与对照表给用户。
+
+---
+
+## 六条硬约束（违反即失败）
+
+1. **只改 △ 行**。对白、`os`、场次标题一律原样。
+2. **剧情事实不增不减**。原文"三天后/车身擦干/油污清走"这类信息必须全部保留，不得新增原文没有的情节、道具或人物。
+3. **只写镜头拍得到的**。禁止心理描写、禁止"仿佛/似乎/某种说不清的"这类不可渲染的模糊修辞。
+4. **克制**。每条 1–2 个准细节即可，不堆五个动作、不堆排比、不撒装饰符号（✦✨）。
+5. **保留 `△ ` 前缀与标点习惯**。简体中文常规标点，别用直角引号，破折号极少用。
+6. **另存新文件**。绝不覆盖用户原件（用户明确偏好）。
+
+---
+
+## 目录结构
+
+```
+script-to-visual/
+├── SKILL.md                      # 本文件：工作流定义
+├── README.md                     # 对外说明与快速开始
+├── references/
+│   ├── 01-改写规则.md             # 核心改写规则（提炼自 vendor）
+│   ├── 02-情绪外显对照表.md        # 情绪→可见行为速查（可直接取用）
+│   └── 03-校验规则.md             # 质检清单与常见翻车案例
+├── examples/                     # 可直接跑通的示例
+│   ├── demo_scene.docx           # 3 场 / 10 条 △ 行的迷你剧本
+│   ├── rewrite_map.demo.json     # 示例改写结果
+│   ├── demo_scene_rewritten.docx # 走完四步后的成品
+│   ├── demo_compare.md           # 机检产出的前后对照表
+│   └── build_demo_docx.py        # 示例 docx 生成器（纯标准库）
+├── vendor/                       # 原样下载的第三方技能素材
+│   ├── SOURCES.md                # 来源、许可证、署名
+│   ├── emotion_SKILL.md / expand_SKILL.md
+│   ├── show-emotion.md / writing-craft.md / sentence-rhythm.md
+│   ├── script-format.md / human-texture.md
+│   ├── visual_video_SKILL.md / visual_universal-rules.md
+│   ├── visual_dramaturgy.md / visual_camera-lighting-vocabulary.md
+│   └── LICENSE_* / NOTICE_*      # 原许可证文件
+├── scripts/
+│   ├── parse_docx.py             # 解析（纯标准库）
+│   ├── split_scenes.py           # 按场次切分 + A/B 级初筛（大剧本并行用）
+│   ├── check_rewrite.py          # 校验（纯标准库）
+│   └── apply_rewrite.py          # 落盘（纯标准库，OOXML 原位替换）
+└── templates/
+    └── rewrite_map.example.json
+```
+
+## 素材来源与许可
+
+见 `vendor/SOURCES.md`。其中 `smixs/visual-skills` 为 **CC-BY-4.0，需署名 Serge Shima, github.com/smixs/visual-skills**；
+`references/01`、`02` 为在两方素材基础上的中文改写与再编排，用于本工作流，署名已保留。
+
+## 依赖
+
+Python 3.9+，**仅标准库**（zipfile / re / json / xml），无需安装 python-docx / lxml。
